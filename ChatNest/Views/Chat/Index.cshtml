@@ -4,38 +4,138 @@
     var username = User.Identity.Name ?? "User";
 }
 
-<link rel="stylesheet" href="~/css/chat.css" />
+<style>
+    body {
+        background: linear-gradient(135deg, #1d2b64, #f8cdda);
+        font-family: 'Segoe UI', sans-serif;
+        color: white;
+        min-height: 100vh;
+    }
 
-<div class="container-fluid">
-    <div class="row">
+    .contacts {
+        background: rgba(0, 0, 0, 0.3);
+        backdrop-filter: blur(12px);
+        padding: 15px;
+        border-radius: 15px;
+        height: calc(100vh - 40px);
+        overflow-y: auto;
+    }
+
+        .contacts h5 {
+            text-align: center;
+            margin-bottom: 15px;
+        }
+
+    .contact-item {
+        padding: 10px 15px;
+        margin-bottom: 5px;
+        border-radius: 10px;
+        cursor: pointer;
+        color: white;
+    }
+
+        .contact-item:hover, .contact-item.selected {
+            background: rgba(255,255,255,0.15);
+        }
+
+    .chat-panel {
+        display: flex;
+        flex-direction: column;
+        height: calc(100vh - 40px);
+    }
+
+    .chat-box {
+        flex: 1;
+        background: rgba(255,255,255,0.1);
+        border-radius: 15px;
+        padding: 15px;
+        overflow-y: auto;
+        margin-bottom: 10px;
+    }
+
+    .chat-message {
+        padding: 8px 12px;
+        border-radius: 10px;
+        margin-bottom: 6px;
+    }
+
+        .chat-message.user {
+            background: rgba(0,255,255,0.2);
+            align-self: flex-end;
+        }
+
+        .chat-message.other {
+            background: rgba(255,255,255,0.15);
+            align-self: flex-start;
+        }
+
+    #chatForm {
+        display: flex;
+        gap: 10px;
+    }
+
+    #messageInput {
+        flex: 1;
+        padding: 10px;
+        border-radius: 25px;
+        border: none;
+        background: rgba(255,255,255,0.2);
+        color: white;
+    }
+
+    .neon-btn {
+        padding: 8px 15px;
+        border: none;
+        border-radius: 25px;
+        background: linear-gradient(90deg, #764ba2, #667eea);
+        color: white;
+        font-weight: bold;
+        cursor: pointer;
+    }
+
+        .neon-btn:hover {
+            box-shadow: 0 0 10px #00c6ff, 0 0 20px #0072ff;
+        }
+
+    #videoContainer {
+        display: grid;
+        grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+        gap: 10px;
+        margin-top: 10px;
+    }
+
+        #videoContainer video {
+            width: 100%;
+            border-radius: 10px;
+            background: black;
+        }
+</style>
+
+<div class="container-fluid py-3">
+    <div class="row g-3">
+        <!-- Left -->
         <div class="col-md-3 contacts">
             <h5>Contacts</h5>
-            <ul class="list-group contact-list" id="contactList">
-                @foreach (var contact in ViewBag.Contacts)
-                {
-                    <li class="list-group-item contact-item">@contact.Username</li>
-                    //1 time more
-                }
-            </ul>   
+            <ul class="list-group contact-list" id="contactList"></ul>
         </div>
 
-        <div class="col-md-9 chat-panel">
-            <div id="chatWindow" class="chat-box">
-                <div class="text-muted text-center">Start chatting…</div>
+        <!-- Middle -->
+        <div class="col-md-6 chat-panel">
+            <div id="chatWindow" class="chat-box d-flex flex-column">
+                <div class="text-muted text-center">💬 Start chatting…</div>
             </div>
-
             <form id="chatForm">
                 <input id="messageInput" type="text" placeholder="Type a message..." />
                 <button type="submit" class="neon-btn">Send</button>
-                <button class="neon-btn" onclick="startAudioCall()">Start Voice Call</button>
+                <button type="button" id="startCallBtn" class="neon-btn">🎥 Start Call</button>
                 <button type="button" id="hangupBtn" class="neon-btn" disabled>📴 Hang Up</button>
             </form>
-            <audio id="localAudio" autoplay muted></audio>
-            <audio id="remoteAudio" autoplay></audio>
+        </div>
 
+        <!-- Right -->
+        <div class="col-md-3">
             <div id="videoContainer">
                 <video id="localVideo" autoplay muted></video>
-                <video id="remoteVideo" autoplay></video>
             </div>
         </div>
     </div>
@@ -43,144 +143,133 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/5.0.9/signalr.min.js"></script>
 <script>
-    const connection = new signalR.HubConnectionBuilder()
-        .withUrl("/chatHub")
-        .build();
-
     const username = "@username";
+    let localStream = null;
+    let peers = {};
+    const rtcConfig = { iceServers: [{ urls: "stun:stun.l.google.com:19302" }] };
+    const localVideo = document.getElementById("localVideo");
+    const videoContainer = document.getElementById("videoContainer");
 
-    connection.start().catch(err => console.error(err.toString()));
+    // --- Messaging connection ---
+    const connection = new signalR.HubConnectionBuilder().withUrl("/chatHub").build();
+    connection.start().then(() => connection.invoke("RequestUserList"));
 
-    document.getElementById("chatForm").addEventListener("submit", function (e) {
+    // Populate contact list
+    connection.on("UserList", users => {
+        const list = document.getElementById("contactList");
+        list.innerHTML = "";
+        users.forEach(u => {
+            const li = document.createElement("li");
+            li.classList.add("contact-item");
+            li.textContent = u;
+            list.appendChild(li);
+        });
+    });
+
+    // Messaging
+    document.getElementById("chatForm").addEventListener("submit", e => {
         e.preventDefault();
-        const message = document.getElementById("messageInput").value;
-        if (message.trim() !== "") {
-            connection.invoke("SendMessage", username, message)
-                .catch(err => console.error(err.toString()));
+        const msg = document.getElementById("messageInput").value;
+        if (msg.trim()) {
+            connection.invoke("SendMessage", username, msg);
             document.getElementById("messageInput").value = "";
         }
     });
 
-    connection.on("ReceiveMessage", function (user, message) {
+    connection.on("ReceiveMessage", (user, message) => {
         const chatWindow = document.getElementById("chatWindow");
-        const msg = document.createElement("div");
-        msg.classList.add("chat-message", user === username ? "user" : "other");
-        msg.innerHTML = `<strong>${user}:</strong> ${message}`;
-        chatWindow.appendChild(msg);
+        const div = document.createElement("div");
+        div.classList.add("chat-message", user === username ? "user" : "other");
+        div.innerHTML = `<strong>${user}:</strong> ${message}`;
+        chatWindow.appendChild(div);
         chatWindow.scrollTop = chatWindow.scrollHeight;
     });
 
-    document.querySelectorAll(".contact-item").forEach(item => {
-        item.addEventListener("click", () => {
-            document.querySelectorAll(".contact-item").forEach(i => i.classList.remove("selected"));
-            item.classList.add("selected");
-        });
+    // --- WebRTC connection ---
+    connection.on("UserJoined", user => { connection.invoke("RequestUserList"); });
+    connection.on("UserLeft", user => {
+        if (peers[user]) { peers[user].close(); delete peers[user]; }
+        const vid = document.getElementById(`video-${user}`);
+        if (vid) vid.remove();
+        connection.invoke("RequestUserList");
     });
-</script>
-<script>
-    const localAudio = document.getElementById("localAudio");
-    const remoteAudio = document.getElementById("remoteAudio");
 
-    let localStream;
-    let peerConnection;
+    function createPeer(remoteUser) {
+        if (peers[remoteUser]) return peers[remoteUser];
+        const pc = new RTCPeerConnection(rtcConfig);
 
-    const rtcConfig = {
-        iceServers: [
-            { urls: "stun:stun.l.google.com:19302" }
-        ]
-    };
+        localStream.getTracks().forEach(track => pc.addTrack(track, localStream));
 
-    const signalingConnection = new signalR.HubConnectionBuilder()
-        .withUrl("/chatHub")
-        .build();
+        pc.ontrack = e => {
+            let vid = document.getElementById(`video-${remoteUser}`);
+            if (!vid) {
+                vid = document.createElement("video");
+                vid.id = `video-${remoteUser}`;
+                vid.autoplay = true; vid.playsInline = true;
+                videoContainer.appendChild(vid);
+            }
+            vid.srcObject = e.streams[0];
+        };
 
-    signalingConnection.start().catch(err => console.error(err.toString()));
+        pc.onicecandidate = e => {
+            if (e.candidate) {
+                connection.invoke("SendSignal", remoteUser, { type: "ice", candidate: e.candidate });
+            }
+        };
 
-    async function startAudioCall() {
-        try {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            localAudio.srcObject = localStream;
+        peers[remoteUser] = pc;
+        return pc;
+    }
 
-            peerConnection = new RTCPeerConnection(rtcConfig);
+    async function startCall() {
+        if (!localStream) {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+            localVideo.srcObject = localStream;
+        }
+        document.getElementById("hangupBtn").disabled = false;
 
-            localStream.getTracks().forEach(track => {
-                peerConnection.addTrack(track, localStream);
-            });
-
-            peerConnection.ontrack = (event) => {
-                remoteAudio.srcObject = event.streams[0];
-            };
-
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    signalingConnection.invoke("SendSignal", {
-                        type: "ice",
-                        candidate: event.candidate
-                    });
-                }
-            };
-
-            const offer = await peerConnection.createOffer();
-            await peerConnection.setLocalDescription(offer);
-
-            signalingConnection.invoke("SendSignal", {
-                type: "offer",
-                sdp: offer
-            });
-
-        } catch (err) {
-            console.error("Audio error:", err);
+        const listItems = document.querySelectorAll("#contactList li");
+        for (let li of listItems) {
+            const remoteUser = li.textContent;
+            const pc = createPeer(remoteUser);
+            const offer = await pc.createOffer();
+            await pc.setLocalDescription(offer);
+            connection.invoke("SendSignal", remoteUser, { type: "offer", sdp: offer });
         }
     }
 
-    signalingConnection.on("ReceiveSignal", async (data) => {
-        if (!peerConnection) {
-            peerConnection = new RTCPeerConnection(rtcConfig);
-
-            peerConnection.ontrack = (event) => {
-                remoteAudio.srcObject = event.streams[0];
-            };
-
-            peerConnection.onicecandidate = (event) => {
-                if (event.candidate) {
-                    signalingConnection.invoke("SendSignal", {
-                        type: "ice",
-                        candidate: event.candidate
-                    });
-                }
-            };
+    function hangUp() {
+        Object.values(peers).forEach(pc => pc.close());
+        peers = {};
+        if (localStream) {
+            localStream.getTracks().forEach(t => t.stop());
+            localStream = null;
         }
+        Array.from(videoContainer.querySelectorAll("video")).forEach(v => {
+            if (v.id !== "localVideo") v.remove();
+        });
+        localVideo.srcObject = null;
+        document.getElementById("hangupBtn").disabled = true;
+    }
+
+    connection.on("ReceiveSignal", async (fromUser, data) => {
+        const pc = createPeer(fromUser);
 
         if (data.type === "offer") {
-            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-            localAudio.srcObject = localStream;
-
-            localStream.getTracks().forEach(track => {
-                peerConnection.addTrack(track, localStream);
-            });
-
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
-            const answer = await peerConnection.createAnswer();
-            await peerConnection.setLocalDescription(answer);
-
-            signalingConnection.invoke("SendSignal", {
-                type: "answer",
-                sdp: answer
-            });
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            const answer = await pc.createAnswer();
+            await pc.setLocalDescription(answer);
+            connection.invoke("SendSignal", fromUser, { type: "answer", sdp: answer });
         }
-
         else if (data.type === "answer") {
-            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            await pc.setRemoteDescription(new RTCSessionDescription(data.sdp));
         }
-
         else if (data.type === "ice") {
-            try {
-                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
-            } catch (e) {
-                console.error("Error adding received ICE candidate", e);
-            }
+            await pc.addIceCandidate(new RTCIceCandidate(data.candidate));
         }
     });
 
-    
+    // Buttons
+    document.getElementById("startCallBtn").onclick = startCall;
+    document.getElementById("hangupBtn").onclick = hangUp;
 </script>
