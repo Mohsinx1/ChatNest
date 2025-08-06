@@ -1,0 +1,185 @@
+﻿@{
+    ViewData["Title"] = "Chat";
+    Layout = "_Layout";
+    var username = User.Identity.Name ?? "User";
+}
+
+<link rel="stylesheet" href="~/css/chat.css" />
+
+<div class="container-fluid">
+    <div class="row">
+        <div class="col-md-3 contacts">
+            <h5>Contacts</h5>
+            <ul class="list-group contact-list" id="contactList">
+                @foreach (var contact in ViewBag.Contacts)
+                {
+                    <li class="list-group-item contact-item">@contact.Username</li>
+                }
+            </ul>
+        </div>
+
+        <div class="col-md-9 chat-panel">
+            <div id="chatWindow" class="chat-box">
+                <div class="text-muted text-center">Start chatting…</div>
+            </div>
+
+            <form id="chatForm">
+                <input id="messageInput" type="text" placeholder="Type a message..." />
+                <button type="submit" class="neon-btn">Send</button>
+                <button class="neon-btn" onclick="startAudioCall()">Start Voice Call</button>
+                <button type="button" id="hangupBtn" class="neon-btn" disabled>📴 Hang Up</button>
+            </form>
+            <audio id="localAudio" autoplay muted></audio>
+            <audio id="remoteAudio" autoplay></audio>
+
+            <div id="videoContainer">
+                <video id="localVideo" autoplay muted></video>
+                <video id="remoteVideo" autoplay></video>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/microsoft-signalr/5.0.9/signalr.min.js"></script>
+<script>
+    const connection = new signalR.HubConnectionBuilder()
+        .withUrl("/chatHub")
+        .build();
+
+    const username = "@username";
+
+    connection.start().catch(err => console.error(err.toString()));
+
+    document.getElementById("chatForm").addEventListener("submit", function (e) {
+        e.preventDefault();
+        const message = document.getElementById("messageInput").value;
+        if (message.trim() !== "") {
+            connection.invoke("SendMessage", username, message)
+                .catch(err => console.error(err.toString()));
+            document.getElementById("messageInput").value = "";
+        }
+    });
+
+    connection.on("ReceiveMessage", function (user, message) {
+        const chatWindow = document.getElementById("chatWindow");
+        const msg = document.createElement("div");
+        msg.classList.add("chat-message", user === username ? "user" : "other");
+        msg.innerHTML = `<strong>${user}:</strong> ${message}`;
+        chatWindow.appendChild(msg);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+    });
+
+    document.querySelectorAll(".contact-item").forEach(item => {
+        item.addEventListener("click", () => {
+            document.querySelectorAll(".contact-item").forEach(i => i.classList.remove("selected"));
+            item.classList.add("selected");
+        });
+    });
+</script>
+<script>
+    const localAudio = document.getElementById("localAudio");
+    const remoteAudio = document.getElementById("remoteAudio");
+
+    let localStream;
+    let peerConnection;
+
+    const rtcConfig = {
+        iceServers: [
+            { urls: "stun:stun.l.google.com:19302" }
+        ]
+    };
+
+    const signalingConnection = new signalR.HubConnectionBuilder()
+        .withUrl("/chatHub")
+        .build();
+
+    signalingConnection.start().catch(err => console.error(err.toString()));
+
+    async function startAudioCall() {
+        try {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localAudio.srcObject = localStream;
+
+            peerConnection = new RTCPeerConnection(rtcConfig);
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            peerConnection.ontrack = (event) => {
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    signalingConnection.invoke("SendSignal", {
+                        type: "ice",
+                        candidate: event.candidate
+                    });
+                }
+            };
+
+            const offer = await peerConnection.createOffer();
+            await peerConnection.setLocalDescription(offer);
+
+            signalingConnection.invoke("SendSignal", {
+                type: "offer",
+                sdp: offer
+            });
+
+        } catch (err) {
+            console.error("Audio error:", err);
+        }
+    }
+
+    signalingConnection.on("ReceiveSignal", async (data) => {
+        if (!peerConnection) {
+            peerConnection = new RTCPeerConnection(rtcConfig);
+
+            peerConnection.ontrack = (event) => {
+                remoteAudio.srcObject = event.streams[0];
+            };
+
+            peerConnection.onicecandidate = (event) => {
+                if (event.candidate) {
+                    signalingConnection.invoke("SendSignal", {
+                        type: "ice",
+                        candidate: event.candidate
+                    });
+                }
+            };
+        }
+
+        if (data.type === "offer") {
+            localStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+            localAudio.srcObject = localStream;
+
+            localStream.getTracks().forEach(track => {
+                peerConnection.addTrack(track, localStream);
+            });
+
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+            const answer = await peerConnection.createAnswer();
+            await peerConnection.setLocalDescription(answer);
+
+            signalingConnection.invoke("SendSignal", {
+                type: "answer",
+                sdp: answer
+            });
+        }
+
+        else if (data.type === "answer") {
+            await peerConnection.setRemoteDescription(new RTCSessionDescription(data.sdp));
+        }
+
+        else if (data.type === "ice") {
+            try {
+                await peerConnection.addIceCandidate(new RTCIceCandidate(data.candidate));
+            } catch (e) {
+                console.error("Error adding received ICE candidate", e);
+            }
+        }
+    });
+
+    
+</script>
